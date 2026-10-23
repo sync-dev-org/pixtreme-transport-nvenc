@@ -10,30 +10,28 @@ dependencies and exposes no Python encoder bindings.
 
 ## Install
 
-Download the `pixtreme_transport_nvenc-<version>-py3-none-manylinux_2_28_x86_64.whl`
-asset from a [GitHub Release](https://github.com/sync-dev-org/pixtreme-transport-nvenc/releases)
-and install the downloaded file into your Python environment:
-
 ```bash
-python -m pip install '/path/to/pixtreme_transport_nvenc-<version>-py3-none-manylinux_2_28_x86_64.whl'
+pip install pixtreme-transport-nvenc
 ```
 
-For a uv environment:
+For a uv project:
 
 ```bash
-uv venv
-uv pip install '/path/to/pixtreme_transport_nvenc-<version>-py3-none-manylinux_2_28_x86_64.whl'
+uv add pixtreme-transport-nvenc
 ```
 
-The wheel has no `Requires-Dist` entries. At runtime, it loads `libcuda.so.1`
-and `libnvidia-encode.so.1` from the host's NVIDIA driver. Neither driver library
-nor the CUDA runtime is bundled in the wheel.
+The package has no Python dependencies. At runtime, the encoder loads
+`libcuda.so.1` and `libnvidia-encode.so.1` from the host's NVIDIA driver.
+Neither driver library nor the CUDA runtime is bundled in the wheel.
 
 ## Supported environments
 
-Release wheels target Linux x86_64 with glibc 2.28 or later, including WSL2, and
-Python 3.12 or later. Their `py3-none` tag is independent of the Python minor
-version. Encoding requires an NVIDIA GPU with HEVC NVENC support and a driver
+PyPI wheels support Linux x86_64 with glibc 2.28 or later
+(`manylinux_2_28_x86_64`), including WSL2, and Python 3.12 or later. One
+`py3-none` wheel serves every supported Python version. PyPI releases contain
+wheels only; no source distribution is uploaded. Installation on another
+operating system or CPU architecture fails with no matching distribution.
+Encoding requires an NVIDIA GPU with HEVC NVENC support and a driver
 supporting CUDA 13 and NVENC API 13.0. Driver API compatibility is checked before
 creating a CUDA context or NVENC session.
 
@@ -128,8 +126,8 @@ classification.
 
 ## Development
 
-Development sources are maintained separately from this repository's Release
-assets. A source checkout has a standalone C++ project in `cpp/` and a Python
+Development sources are maintained separately from the published package. A
+source checkout has a standalone C++ project in `cpp/` and a Python
 packaging project in `python/`. Builds require Python 3.12+, a C++17 compiler,
 CMake 3.28+ and the CUDA 13 toolkit. The development checkout's
 `docs/development.md` contains wheel-build, test and throughput-measurement
