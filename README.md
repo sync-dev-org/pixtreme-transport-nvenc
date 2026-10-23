@@ -1,10 +1,10 @@
 # pixtreme-transport-nvenc
 
-`pixtreme-transport-nvenc` provides a C++ shared library for H.265 encoding with
-NVIDIA NVENC. C++ output modules link the encoder, submit frames in CUDA device
+`pixtreme-transport-nvenc` provides a shared library with a C ABI for H.265 encoding with
+NVIDIA NVENC. C and C++ output modules link the encoder, submit frames in CUDA device
 memory, and receive encoded access units with their original timestamps.
 
-One wheel includes the shared library, public C++ header, CMake package
+One wheel includes the shared library, public C header and header-only C++ wrapper, CMake package
 configuration, and license notices. The package has no Python runtime
 dependencies and exposes no Python encoder bindings.
 
@@ -40,10 +40,12 @@ host C++ code and NVIDIA driver APIs, with no embedded CUDA kernels. Hardware
 execution has been verified on compute capability 8.6; execution on 8.9 and
 12.0 hardware has not been verified.
 
-## Use from C++
+## Use from C and C++
 
-The public header is `<pixtreme/nvenc/encoder.hpp>`. It uses C++17 types and
-requires neither CUDA headers nor core headers. Locate the installed CMake
+Version 0.2.0 provides `<pixtreme/nvenc/c/encoder.h>` for C and
+`<pixtreme/nvenc/encoder.hpp>` for C++17. The C++ wrapper is header-only;
+only C functions cross the shared-library boundary. Both headers require
+neither CUDA headers nor core headers. Locate the installed CMake
 prefix using the Python interpreter from the environment containing the wheel:
 
 ```bash
@@ -85,10 +87,56 @@ breaking library loading.
 An optional version in `find_package` sets a minimum version. Before any other
 encoder operation, compare `pixtreme::transport::nvenc::runtime_abi_version()`
 with the public header's `pixtreme::transport::nvenc::abi_version` and stop if
-they differ. The current ABI version is 2. CMake package discovery does not
-perform this runtime check. Build consumers with the same compiler, standard
-library and build configuration as the encoder, since C++ types and exceptions
-cross the library boundary.
+they differ. The current ABI version is 3. CMake package discovery does not
+perform this runtime check. C++ classes, exceptions and automatic resource
+management stay in the consumer's header-only wrapper, so consumers can use a
+different compiler and standard library from the encoder.
+
+### C API
+
+For a C consumer, set `project(output_module LANGUAGES C)` in the CMake
+example and include `<pixtreme/nvenc/c/encoder.h>`. Before any other operation,
+compare `pixtreme_transport_nvenc_runtime_abi_version()` with
+`PIXTREME_TRANSPORT_NVENC_ABI_VERSION` and stop if they differ.
+
+C types and functions use the `pixtreme_transport_nvenc_` prefix. Start each
+record with `struct_size = sizeof(record)`. A settings record requires every
+field through `device`; its optional colour fields default to zero
+when omitted.
+Loan descriptors require every field through `loan_id` even on output. Other
+outputs write only complete members that fit the caller's capacity. Accepted settings, SPS colour readback and low-latency switches are returned
+in three independent records, so each record can grow without moving fields in
+another record. The header documents the field rules, including unknown extensions and partial fields.
+
+Create a session with `pixtreme_transport_nvenc_session_create`. Its remaining
+operations are `session_borrow_input`, `session_encode`, `return_input`,
+`session_flush`, `session_close`, `session_wait_closed`, `session_take`, and
+`session_effective_settings`, with the same prefix. Event handles use
+`uintptr_t`, and wait durations use nonnegative `int64_t` milliseconds.
+The functions return an `int32_t` status and optionally an owned error handle;
+read its reason, classification and message, then release it with
+`pixtreme_transport_nvenc_error_release`. No exception escapes a C function.
+Exhausted inputs, pending output and a close wait timeout return success with
+a separate result indicating that state.
+
+A newly returned session, input owner or error owns one reference.
+Use the matching retain/release functions for copies and final release. Each
+borrowed descriptor owns its `owner` reference: encode or return consumes the
+loan once, and the caller then releases that reference. Copying a descriptor
+requires retaining its owner. Releasing a session closes it; an outstanding
+loan remains returnable through its owner after that release.
+The C++ wrapper performs this reference management automatically.
+
+For output, pass a writable host buffer and its capacity to `session_take`,
+along with pointers for size, timestamp, IDR state and take status. A capacity
+of zero with a null buffer is a normal size query. `BUFFER_TOO_SMALL` succeeds
+without changing the buffer, consuming the AU or releasing its input, and
+reports a required size greater than the supplied capacity. Allocate at least
+that size and retry. Another consumer can take the queried AU in between, so
+each retry checks the current front and can require more capacity. Share one
+waiting deadline across retries. `ACCESS_UNIT` writes exactly the actual size
+and consumes the AU once. The caller owns those bytes independently of the
+session. No access-unit handle needs to be retained or released.
 
 ### Session API
 
@@ -107,7 +155,9 @@ its producer must use that same context.
 
 `encode()` submits work without waiting for encoding to finish. Call
 `take(std::chrono::milliseconds)` to receive an access unit, a not-ready result,
-or the end of the stream after flushing. Every submitted frame yields one
+or the end of the stream after flushing. The wrapper prepares its vector before
+consuming an AU. If allocation fails, a later `take()` can retry the same queued
+output; its input stays unavailable until successful delivery. Every submitted frame yields one
 access unit in input order, with its timestamp unchanged. Encoding uses no
 B-frames or lookahead and does not wait for later frames to produce an access
 unit. `effective_settings()` exposes accepted settings and separate SPS colour
