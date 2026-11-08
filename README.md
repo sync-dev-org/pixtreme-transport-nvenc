@@ -2,12 +2,13 @@
 
 `pixtreme-transport-nvenc` provides a shared library with a C ABI for H.264,
 H.265 (HEVC) and AV1 encoding with NVIDIA NVENC. C and C++ output modules link
-the encoder, submit frames in CUDA device memory, and receive encoded access
-units with their original timestamps.
+the encoder, write each frame into an encoder-owned CUDA region lent as a
+[pixtreme](https://pypi.org/project/pixtreme/) `PixelBuffer`, and receive
+encoded access units with their original timestamps.
 
 One wheel includes the shared library, public C header and header-only C++ wrapper, CMake package
-configuration, and license notices. The package has no Python runtime
-dependencies and exposes no Python encoder bindings.
+configuration, and license notices. It depends on the pixtreme wheel and
+exposes no Python encoder bindings.
 
 ## Install
 
@@ -21,9 +22,11 @@ For a uv project:
 uv add pixtreme-transport-nvenc
 ```
 
-The package has no Python dependencies. At runtime, the encoder loads
-`libcuda.so.1` and `libnvidia-encode.so.1` from the host's NVIDIA driver.
-Neither driver library nor the CUDA runtime is bundled in the wheel.
+The package depends on `pixtreme>=2.11.0`, whose wheel supplies the
+`PixelBuffer` type and `libpixtreme.so.2`; the encoder finds that library in
+the same environment. At runtime, the encoder loads `libcuda.so.1` and
+`libnvidia-encode.so.1` from the host's NVIDIA driver. Neither driver library
+nor the CUDA runtime is bundled in the wheel.
 
 ## Supported environments
 
@@ -59,8 +62,10 @@ resource-allocation failures.
 
 The package provides `<pixtreme/nvenc/c/encoder.h>` for C and
 `<pixtreme/nvenc/encoder.hpp>` for C++17. The C++ wrapper is header-only;
-only C functions cross the shared-library boundary. Both headers require
-neither CUDA headers nor core headers. Locate the installed CMake
+only C functions cross the shared-library boundary. Both headers include
+pixtreme's `<pixtreme/pixel_buffer.h>` and require neither CUDA headers nor
+core headers. The package configuration finds the pixtreme SDK installed in the
+same environment. Locate the installed CMake
 prefix using the Python interpreter from the environment containing the wheel:
 
 ```bash
@@ -82,21 +87,21 @@ add_executable(output_module main.cpp)
 target_link_libraries(output_module PRIVATE pixtreme::transport_nvenc)
 ```
 
-The target supplies the public include directory, C++17 requirement and shared
-library. CMake gives the build executable a runtime search path to the encoder.
-An installed consumer must retain an appropriate `INSTALL_RPATH`. For a shared
-library installed at `pixtreme/transport/output/liboutput.so`, use a path
-relative to that library:
+The target supplies the public include directories, the pixtreme target,
+C++17 requirement and shared library. CMake gives the build executable a
+runtime search path to the encoder and pixtreme. An installed consumer must
+retain an appropriate `INSTALL_RPATH`. For a shared library installed at
+`pixtreme/transport/output/liboutput.so`, use paths relative to that library:
 
 ```cmake
 target_link_libraries(output PRIVATE pixtreme::transport_nvenc)
-set_target_properties(output PROPERTIES INSTALL_RPATH "$ORIGIN/../nvenc")
+set_target_properties(output PROPERTIES INSTALL_RPATH "$ORIGIN/../nvenc;$ORIGIN/../../core/lib")
 install(TARGETS output LIBRARY DESTINATION pixtreme/transport/output)
 ```
 
 Keep the encoder in its own wheel. If the consumer wheel uses `auditwheel
-repair`, exclude `libpixtreme_nvenc.so` and the NVIDIA driver libraries from
-copying. Relative `$ORIGIN` paths allow the Python environment to move without
+repair`, exclude `libpixtreme_nvenc.so`, `libpixtreme.so.2` and the NVIDIA
+driver libraries from copying. Relative `$ORIGIN` paths allow the Python environment to move without
 breaking library loading.
 
 Release tags use `vX.Y.Z`. CMake uses the numeric release segment of the wheel
@@ -105,7 +110,7 @@ version. Package versions and the runtime ABI version advance independently.
 An optional version in `find_package` sets a minimum version. Before any other
 encoder operation, compare `pixtreme::transport::nvenc::runtime_abi_version()`
 with the public header's `pixtreme::transport::nvenc::abi_version` and stop if
-they differ. The current ABI version is 4. CMake package discovery does not
+they differ. The current ABI version is 5. CMake package discovery does not
 perform this runtime check. C++ classes, exceptions and automatic resource
 management stay in the consumer's header-only wrapper, so consumers can use a
 different compiler and standard library from the encoder.
@@ -118,55 +123,46 @@ compare `pixtreme_transport_nvenc_runtime_abi_version()` with
 `PIXTREME_TRANSPORT_NVENC_ABI_VERSION` and stop if they differ.
 
 C types and functions use the `pixtreme_transport_nvenc_` prefix. Start each
-record with `struct_size = sizeof(record)`. A settings record requires every
-field through `device`; absent optional colour and control fields use zero
-defaults. Set `struct_size` to the record size defined by the caller's header,
-rather than the capacity of a larger allocation.
-Loan descriptors require every field through `offset_2` for every input format,
-even on output. A shorter descriptor is rejected before a loan is issued. Other
-outputs write only complete members that fit the caller's capacity. Accepted settings, bitstream colour readback and low-latency switches are returned
-in three independent records, so each record can grow without moving fields in
-another record. The header documents the field rules, including unknown extensions and partial fields.
+record with `struct_size = sizeof(record)`, the record size defined by the
+caller's header rather than the capacity of a larger allocation. A settings
+record requires every field this header defines; fields that a later header
+appends use defaults when absent. Outputs write only complete members that fit
+the caller's capacity. Accepted settings, bitstream colour readback and
+low-latency switches are returned in three independent records, so each record
+can grow without moving fields in another record. The header documents the
+field rules, including unknown extensions and partial fields.
 
 Create a session with `pixtreme_transport_nvenc_session_create`. Its remaining
-operations are `session_borrow_input`, `session_encode`, `return_input`,
-`session_flush`, `session_close`, `session_wait_closed`, `session_take`,
-`session_take_with_metadata`, and
-`session_effective_settings`, with the same prefix. Event handles use
-`uintptr_t`, and wait durations use nonnegative `int64_t` milliseconds.
-The functions return an `int32_t` status and optionally an owned error handle;
-read its reason, classification and message, then release it with
-`pixtreme_transport_nvenc_error_release`. No exception escapes a C function.
-Exhausted inputs, pending output and a close wait timeout return success with
-a separate result indicating that state.
+operations are `session_acquire_input`, `session_encode`, `session_flush`,
+`session_close`, `session_take` and `session_effective_settings`, with the same
+prefix. Input regions are `pixtreme_pixel_buffer_t` handles, and wait durations
+use nonnegative `int64_t` milliseconds. The functions return an `int32_t`
+status and optionally an owned error handle; read its reason, classification
+and message, then release it with `pixtreme_transport_nvenc_error_release`. No
+exception escapes a C function. An exhausted input pool, a full access-unit
+queue, pending output and an unconfirmed close return success with a separate
+result indicating that state.
 
-A newly returned session, input owner or error owns one reference.
-Use the matching retain/release functions for copies and final release. Each
-borrowed descriptor owns its `owner` reference: encode or return consumes the
-loan once, and the caller then releases that reference. Copying a descriptor
-requires retaining its owner. Releasing a session closes it; an outstanding
-loan remains returnable through its owner after that release.
-The C++ wrapper performs this reference management automatically.
+A newly returned session or error owns one reference. Use the matching
+retain/release functions for copies and final release. Releasing a session's
+last reference starts closing it without waiting. `session_acquire_input`
+returns an owning PixelBuffer, which the caller releases with pixtreme's
+`pixtreme_pixel_buffer_release` or `pixtreme_pixel_buffer_destroy`. The C++
+wrapper performs this reference management automatically.
 
 For output, pass a writable host buffer and its capacity to `session_take`,
-along with pointers for size, timestamp, IDR state and take status. A capacity
-of zero with a null buffer is a normal size query.
-`PIXTREME_TRANSPORT_NVENC_BUFFER_TOO_SMALL` succeeds
-without changing the buffer, consuming the AU or releasing its input, and
-reports a required size greater than the supplied capacity. Allocate at least
-that size and retry. Another consumer can take the queried AU in between, so
-each retry checks the current front and can require more capacity. Share one
-waiting deadline across retries. `PIXTREME_TRANSPORT_NVENC_ACCESS_UNIT`
-writes exactly the actual size
-and consumes the AU once. The caller owns those bytes independently of the
-session. No access-unit handle needs to be retained or released.
-
-`session_take_with_metadata` follows the same rules and receives a sized
-`pixtreme_transport_nvenc_access_unit_metadata` record instead of separate
-metadata scalars. The record supplies `timestamp`, `is_idr`, `display_order`
-and `picture_type`. Both take operations are available. The input descriptor
-stores its first two planes in the `row_stride` and `offset` arrays and its
-third plane in `row_stride_2` and `offset_2`.
+along with pointers for size, a sized
+`pixtreme_transport_nvenc_access_unit_metadata` record and the take status.
+The record supplies `timestamp`, `is_idr`, `display_order` and
+`picture_type`. A capacity of zero with a null buffer is a normal size query.
+`PIXTREME_TRANSPORT_NVENC_BUFFER_TOO_SMALL` succeeds without changing the
+buffer or consuming the AU, and reports a required size greater than the
+supplied capacity. Allocate at least that size and retry. Another consumer can
+take the queried AU in between, so each retry checks the current front and can
+require more capacity. Share one waiting deadline across retries.
+`PIXTREME_TRANSPORT_NVENC_ACCESS_UNIT` writes exactly the actual size and
+consumes the AU once. The caller owns those bytes, which stay valid after the
+session is released. No access-unit handle needs to be retained or released.
 
 ### Session API
 
@@ -203,44 +199,61 @@ regions are required without lookahead and `1+B+L` with lookahead, where
 `B=b_frames` and `L=lookahead_depth`. A smaller count is an
 `invalid_configuration` error during session creation. For example, two B
 frames and lookahead depth four require at least seven regions. When every
-region is in use, `borrow_input()` returns without waiting and reports that
-none is available.
+region is in use, `acquire_input()` returns without waiting and reports that
+none is available. While `access_unit_queue_limit` (at least one) access units
+wait for `take()`, `encode()` returns `false` without consuming its input.
+Inputs that NVENC is still reading add their access units after `encode()`
+accepted them, so up to `access_unit_queue_limit + input_slots - 1` access
+units can wait.
 
 #### Input formats
 
-The API covers these thirteen SDK 13.0 formats, subject to codec and GPU
-support. RGB inputs use NVENC's internal RGB-to-YUV conversion.
+The API covers the SDK 13.0 formats that a pixtreme `PixelFormat` describes,
+subject to codec and GPU support. Each lent PixelBuffer has the corresponding
+pixtreme format.
 
-| `InputFormat` value | Input precision and layout | Planes |
-|---|---|---|
-| `InputFormat::nv12` | 8-bit 4:2:0, Y then interleaved UV | 2 |
-| `InputFormat::p010` | 10-bit 4:2:0, Y then interleaved UV | 2 |
-| `InputFormat::yv12` | 8-bit 4:2:0, Y then V then U | 3 |
-| `InputFormat::iyuv` | 8-bit 4:2:0, Y then U then V | 3 |
-| `InputFormat::yuv444` | 8-bit 4:4:4, Y then U then V | 3 |
-| `InputFormat::yuv444_10bit` | 10-bit 4:4:4, Y then U then V | 3 |
-| `InputFormat::nv16` | 8-bit 4:2:2, Y then interleaved UV | 2 |
-| `InputFormat::p210` | 10-bit 4:2:2, Y then interleaved UV | 2 |
-| `InputFormat::argb` | 8-bit packed A8R8G8B8 word | 1 |
-| `InputFormat::abgr` | 8-bit packed A8B8G8R8 word | 1 |
-| `InputFormat::argb10` | 10-bit packed A2R10G10B10 word | 1 |
-| `InputFormat::abgr10` | 10-bit packed A2B10G10R10 word | 1 |
-| `InputFormat::ayuv` | 8-bit packed A8Y8U8V8 word | 1 |
+| `InputFormat` value | pixtreme `PixelFormat` | Input precision and layout | Planes |
+|---|---|---|---|
+| `InputFormat::nv12` | `nv12` | 8-bit 4:2:0, Y then interleaved UV | 2 |
+| `InputFormat::p010` | `p010` | 10-bit 4:2:0, Y then interleaved UV | 2 |
+| `InputFormat::yv12` | `yv12` | 8-bit 4:2:0, Y then V then U | 3 |
+| `InputFormat::iyuv` | `yuv420p` | 8-bit 4:2:0, Y then U then V | 3 |
+| `InputFormat::yuv444` | `yuv444p` | 8-bit 4:4:4, Y then U then V | 3 |
+| `InputFormat::yuv444_10bit` | `yuv444p10msb` | 10-bit 4:4:4, Y then U then V | 3 |
+| `InputFormat::nv16` | `nv16` | 8-bit 4:2:2, Y then interleaved UV | 2 |
+| `InputFormat::p210` | `p210` | 10-bit 4:2:2, Y then interleaved UV | 2 |
+| `InputFormat::ayuv` | `vuya` | 8-bit packed V8U8Y8A8 bytes | 1 |
+
+The packed RGB values `argb`, `abgr`, `argb10` and `abgr10` remain reserved
+for the SDK's RGB inputs. pixtreme 2.11.0 has no `PixelFormat` for them, so
+session creation rejects them as an `invalid_configuration` error.
 
 #### Input and output
 
-Call `borrow_input()` to obtain an available `InputBuffer`. It describes the
-encoder-owned CUDA allocation and each plane's row stride and offset. Write
-the frame into that allocation, then pass the buffer, the producer-completion
-CUDA event as `std::uintptr_t`, and a `std::uint64_t` timestamp to `encode()`.
-The encoder uses the selected device's primary CUDA context. The caller and
-its producer must use that same context.
+Call `acquire_input()` to obtain a free input region as a
+`pixtreme::pixel_buffer`. It wraps encoder-owned CUDA memory in the session's
+format, dimensions and NVENC plane layout, with unknown colour declarations.
+Write the frame into it, for example with pixtreme's `to_pixel_buffer`, and
+record the write in pixtreme's use records (pixtreme's conversions record their
+writes; record other work with `pixtreme_ndarray_record_stream`). Then pass the
+PixelBuffer and a `std::uint64_t` timestamp to `encode()`. NVENC waits on the
+GPU for the recorded uses, so the caller needs no host synchronization. The
+encoder uses the selected device's primary CUDA context, and the caller must
+write on that device.
 
-`encode()` submits work without waiting for encoding to finish. Call
+`encode()` submits work without waiting for encoding to finish and accepts
+only a region lent by the same session that has not been encoded. The encoder
+holds its own reference until NVENC has read the input. A region becomes free
+again once every reference is released and the work on the final release
+stream completes; taking its access unit is not required. Release a region that
+was never encoded with the stream of its last use. Once the session has been
+released and its close has finished, releasing the last region that the caller
+still holds waits inside that release call until the work on the regions'
+release streams completes; the wait does not keep the CPU busy. Call
 `take(std::chrono::milliseconds)` to receive an access unit, a not-ready result,
 or the end of the stream after flushing. The wrapper prepares its vector before
 consuming an AU. If allocation fails, a later `take()` can retry the same queued
-output; its input stays unavailable until successful delivery.
+output.
 
 Every submitted picture yields one access unit, including when identical
 pixels are submitted again. Access units are returned in coding order, which
@@ -261,16 +274,15 @@ without waiting for a later input. Enabling either feature allows output to
 be delayed. `effective_settings()` exposes the accepted settings and separate
 bitstream colour readback.
 
-`Session::return_input()` returns an unused loan with its producer-completion
-event; omit the event only when no GPU work used the loan. `flush()` ends input
-without waiting for the remaining access units. Continue calling `take()` to
-drain them. `close()` stops input immediately; outstanding outputs remain
-available, and an internal collector can finish work after `close()` returns.
-After returning unused loans, call `wait_closed(timeout)` to confirm that all
-input reads, cleanup and the collector thread have finished. A timeout returns
-`false`; failed cleanup throws `EncoderError`. Other operation failures also
-use `EncoderError`, which exposes their reason and recoverable or fatal
-classification.
+`flush()` ends input without waiting for the remaining access units. Continue
+calling `take()` to drain them. `close(timeout)` stops input and waits up to
+the timeout until NVENC no longer reads any accepted input and the internal
+collector has exited; it returns `false` while that is unconfirmed and can be
+called again. Outstanding outputs remain available through `take()` after
+close. A region the caller still holds keeps its memory until its final
+release. A cleanup failure throws a fatal `EncoderError` distinct from the
+original output error. Other operation failures also use `EncoderError`, which
+exposes their reason and recoverable or fatal classification.
 
 ### Colour signalling
 
