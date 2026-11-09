@@ -110,7 +110,7 @@ version. Package versions and the runtime ABI version advance independently.
 An optional version in `find_package` sets a minimum version. Before any other
 encoder operation, compare `pixtreme::transport::nvenc::runtime_abi_version()`
 with the public header's `pixtreme::transport::nvenc::abi_version` and stop if
-they differ. The current ABI version is 5. CMake package discovery does not
+they differ. The current ABI version is 6. CMake package discovery does not
 perform this runtime check. C++ classes, exceptions and automatic resource
 management stay in the consumer's header-only wrapper, so consumers can use a
 different compiler and standard library from the encoder.
@@ -127,10 +127,10 @@ record with `struct_size = sizeof(record)`, the record size defined by the
 caller's header rather than the capacity of a larger allocation. A settings
 record requires every field this header defines; fields that a later header
 appends use defaults when absent. Outputs write only complete members that fit
-the caller's capacity. Accepted settings, bitstream colour readback and
-low-latency switches are returned in three independent records, so each record
-can grow without moving fields in another record. The header documents the
-field rules, including unknown extensions and partial fields.
+the caller's capacity. Accepted settings and low-latency switches are returned
+in two independent records, so each record can grow without moving fields in
+the other record. The header documents the field rules, including unknown
+extensions and partial fields.
 
 Create a session with `pixtreme_transport_nvenc_session_create`. Its remaining
 operations are `session_acquire_input`, `session_encode`, `session_flush`,
@@ -271,8 +271,8 @@ coded reference. Its metadata and timestamp identify the shown input picture.
 
 With B frames and lookahead disabled, an input's AU is returned after encoding
 without waiting for a later input. Enabling either feature allows output to
-be delayed. `effective_settings()` exposes the accepted settings and separate
-bitstream colour readback.
+be delayed. `effective_settings()` exposes the accepted settings, including
+the colour request, and the low-latency switches.
 
 `flush()` ends input without waiting for the remaining access units. Continue
 calling `take()` to drain them. `close(timeout)` stops input and waits up to
@@ -288,39 +288,47 @@ exposes their reason and recoverable or fatal classification.
 
 `Settings::colour` takes H.273 codes through `ColourSignalling`: `primaries`,
 `transfer`, `matrix` and `full_range` (0 for limited range, 1 for full range).
-Specify all four values or leave all four absent. H.264 and HEVC use the SPS
-VUI; AV1 uses the sequence header's `color_config`. With all four absent,
-H.264/HEVC set `video_signal_type_present_flag=0`. AV1 sets
-`color_description_present_flag=0`, omits the three codes, and writes
-`color_range=0`.
+Each value is specified or left absent on its own; absent codes are written as
+2 (unspecified) and an absent range as 0. H.264 and HEVC use the SPS VUI: any
+specified value sets `video_signal_type_present_flag=1` with `video_format=5`
+(unspecified), and any specified code sets `colour_description_present_flag=1`.
+With all four absent, H.264/HEVC set `video_signal_type_present_flag=0`. AV1
+uses the sequence header's `color_config`, which always carries a range; it
+sets `color_description_present_flag=0` when all three codes are absent or 2.
 
 `chroma_location` supplies top and bottom field H.273 types through
-`ChromaLocation`. It is valid only for 4:2:0 output. H.264/HEVC accept types
-0–5; progressive content should normally use the same type for both fields.
-AV1 requires equal types that map to its single `chroma_sample_position`:
-type 0 maps to position 1 and type 2 maps to position 2. Reserved codes,
-partial four-value requests and colour requests that the selected codec and
-chroma format cannot express are rejected as `invalid_configuration` before
-session creation.
+`ChromaLocation`. It is valid only for 4:2:0 output; without it, H.264/HEVC set
+`chroma_loc_info_present_flag=0`. H.264/HEVC accept types 0–5; progressive
+content should normally use the same type for both fields. AV1 requires equal
+types that map to its single `chroma_sample_position`: type 0 maps to position
+1 and type 2 maps to position 2. Reserved codes, out-of-range values and colour
+requests that the selected codec and chroma format cannot express are rejected
+as `invalid_configuration` before session creation. For example, AV1 infers
+full range for BT.709 primaries with the sRGB transfer and the identity matrix,
+so that combination requires `full_range` 1.
 
-The result of `effective_settings()` separates the colour request in
-`accepted.colour` from the syntax readback in `sps_colour`, for every codec
-including AV1. Fields absent from the bitstream stay absent in the readback.
-AV1's written range is read back even when the four values were not specified.
+`effective_settings().accepted.colour` returns the colour request. The encoder
+does not read colour back from its output; inspect the bitstream to check the
+written values.
 
 ## Measured throughput
 
 In 60-second HEVC measurements on an RTX A6000 under WSL2 (driver 616.92,
-CUDA 13.2.86, Release build), both NV12/Main and P010/Main10 sustained
+CUDA 13.2.86, Release build), both NV12/Main and P010/Main10 were measured at
 1920x1080 at 30000/1001 fps, 3840x2160 at 30000/1001 fps, and 1920x1080 at
 60000/1001 fps. Each configuration used four input regions, no B frames or
 lookahead, CBR at 10 Mbps for 1080p or 35 Mbps for 2160p. GOP and IDR periods
 were 60 frames at 30000/1001 fps and 120 frames at 60000/1001 fps. Inputs
 were tested both as fast as possible and at the specified frame rate. All
-inputs produced an AU, with no skipped inputs in the paced runs. The measured
-GPU was reserved for encoding; work on a separate GPU ran concurrently. These
-measurements cover the encoder with a CUDA test-picture producer, excluding
-the core conversion and output module.
+submitted inputs produced an AU. Submitting as fast as possible, every
+configuration encoded at least 220 fps at 1920x1080 and at least 149 fps at
+3840x2160. At the specified frame rate, the paced runs skipped no inputs,
+except the 1920x1080 NV12/Main run at 60000/1001 fps, which skipped one of
+3,597 scheduled inputs because no input region or access unit queue space
+was free at its scheduled time. The measured GPU was reserved for encoding
+and the benchmark was pinned to two logical CPUs; work on a separate GPU ran
+concurrently on other CPUs. These measurements cover the encoder with a CUDA
+test-picture producer, excluding the core conversion and output module.
 
 ## Distribution
 
