@@ -305,7 +305,9 @@ types that map to its single `chroma_sample_position`: type 0 maps to position
 requests that the selected codec and chroma format cannot express are rejected
 as `invalid_configuration` before session creation. For example, AV1 infers
 full range for BT.709 primaries with the sRGB transfer and the identity matrix,
-so that combination requires `full_range` 1.
+so that combination requires `full_range` 1. H.264 and HEVC allow the matrix
+codes 0 (identity), 16 (YCgCo-Re) and 17 (YCgCo-Ro) only for 4:4:4 output, so
+4:2:0 and 4:2:2 requests with those codes are rejected.
 
 `effective_settings().accepted.colour` returns the colour request. The encoder
 does not read colour back from its output; inspect the bitstream to check the
