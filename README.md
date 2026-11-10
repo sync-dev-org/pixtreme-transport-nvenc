@@ -4,11 +4,12 @@
 H.265 (HEVC) and AV1 encoding with NVIDIA NVENC. C and C++ output modules link
 the encoder, write each frame into an encoder-owned CUDA region lent as a
 [pixtreme](https://pypi.org/project/pixtreme/) `PixelBuffer`, and receive
-encoded access units with their original timestamps.
+encoded access units with their original timestamps. The Python module
+`pixtreme.transport.nvenc` offers the same operations to Python code.
 
 One wheel includes the shared library, public C header and header-only C++ wrapper, CMake package
-configuration, and license notices. It depends on the pixtreme wheel and
-exposes no Python encoder bindings.
+configuration, the Python module, and license notices. It depends on the
+pixtreme wheel.
 
 ## Install
 
@@ -22,7 +23,7 @@ For a uv project:
 uv add pixtreme-transport-nvenc
 ```
 
-The package depends on `pixtreme>=2.11.0`, whose wheel supplies the
+The package depends on `pixtreme>=2.12.0`, whose wheel supplies the
 `PixelBuffer` type and `libpixtreme.so.2`; the encoder finds that library in
 the same environment. At runtime, the encoder loads `libcuda.so.1` and
 `libnvidia-encode.so.1` from the host's NVIDIA driver. Neither driver library
@@ -31,8 +32,9 @@ nor the CUDA runtime is bundled in the wheel.
 ## Supported environments
 
 PyPI wheels support Linux x86_64 with glibc 2.28 or later
-(`manylinux_2_28_x86_64`), including WSL2, and Python 3.12 or later. One
-`py3-none` wheel serves every supported Python version. PyPI releases contain
+(`manylinux_2_28_x86_64`), including WSL2, and CPython 3.12 or later. One
+`cp312-abi3` wheel, whose Python module uses CPython's stable ABI, serves every
+supported Python version. PyPI releases contain
 wheels only; no source distribution is uploaded. Installation on another
 operating system or CPU architecture fails with no matching distribution.
 Encoding requires an NVIDIA GPU with NVENC support for the selected codec and
@@ -57,6 +59,62 @@ an `unsupported` error reason identifying the codec and setting. Invalid
 arguments and conflicting settings use `invalid_configuration`. Unsupported
 configurations are also distinguished from driver-query, initialization and
 resource-allocation failures.
+
+## Use from Python
+
+`pixtreme.transport.nvenc` is a thin nanobind module over the C ABI and its
+C++ wrapper described below. It offers the same operations, with Python
+conventions: classes, functions and attributes keep the C++ names, enumeration
+members are the C++ names in upper case (`Codec.HEVC` for `Codec::hevc`), and
+timeouts are nonnegative seconds rather than milliseconds.
+
+```python
+import pixtreme.transport.nvenc as nvenc
+from pixtreme.io import to_pixel_buffer
+
+session = nvenc.Session(nvenc.Settings(
+    codec=nvenc.Codec.HEVC, input_format=nvenc.InputFormat.NV12,
+    width=1920, height=1080, profile=nvenc.Profile.MAIN,
+    rate_control=nvenc.RateControl.CBR, bitrate=10_000_000,
+    frame_rate=nvenc.FrameRate(30000, 1001), gop_length=60, idr_period=60,
+    input_slots=4, access_unit_queue_limit=4))
+
+buffer = session.acquire_input()  # a pixtreme.PixelBuffer, or None when every region is in use
+to_pixel_buffer(frame, out=buffer)  # frame: a pixtreme Frame on the session's device
+while not session.encode(buffer, timestamp):
+    ...  # the access unit queue is full: take access units, then submit again
+del buffer
+
+result = session.take(0.1)
+if result.status is nvenc.TakeStatus.ACCESS_UNIT:
+    unit = result.access_unit  # unit.bitstream is bytes; unit.timestamp is the input's timestamp
+
+session.flush()
+while (result := session.take(1.0)).status is not nvenc.TakeStatus.END:
+    ...
+session.close(5.0)
+```
+
+`acquire_input()` lends an encoder-owned region as a `pixtreme.PixelBuffer`.
+`pixtreme.io.to_pixel_buffer` records its write in pixtreme's use records; record
+other writes with `buffer.storage.record_stream(stream)`. `encode()` accepts only
+such a region and the caller's integer timestamp; it does not accept a pixtreme
+`Frame`. Release the region by dropping the last reference to it. `take(timeout)`
+returns a `TakeResult` whose `status` is `ACCESS_UNIT`, `NOT_READY` or, after
+`flush()`, `END`; its `access_unit` holds the bitstream as `bytes`, the
+timestamp, `is_idr`, `display_order` and `picture_type`. `close(timeout)`
+returns `False` while it cannot confirm that NVENC no longer reads input.
+`effective_settings()` returns the accepted settings and low-latency switches.
+
+Operations that wait for the GPU, NVENC or output release the GIL, and one
+`Session` can be used from several Python threads. A failed operation raises
+`EncoderError`, a `RuntimeError` whose `reason` (`ErrorReason`) and
+`classification` (`ErrorClassification`) are those of the C error. Arguments of
+the wrong type raise `TypeError`, and negative or NaN timeouts raise
+`ValueError`. `ABI_VERSION` is the ABI version of the header the module was
+built with; importing the module fails with `ImportError` when the loaded
+encoder library reports a different `runtime_abi_version()`. The package
+includes `py.typed` and a stub generated from the module for type checkers.
 
 ## Use from C and C++
 
@@ -222,11 +280,32 @@ pixtreme format.
 | `InputFormat::yuv444_10bit` | `yuv444p10msb` | 10-bit 4:4:4, Y then U then V | 3 |
 | `InputFormat::nv16` | `nv16` | 8-bit 4:2:2, Y then interleaved UV | 2 |
 | `InputFormat::p210` | `p210` | 10-bit 4:2:2, Y then interleaved UV | 2 |
+| `InputFormat::argb` | `bgra` | 8-bit packed RGB, B8G8R8A8 bytes | 1 |
+| `InputFormat::abgr` | `rgba` | 8-bit packed RGB, R8G8B8A8 bytes | 1 |
+| `InputFormat::argb10` | `x2rgb10` | 10-bit packed RGB, little-endian 32-bit word with B in bits 0–9, G in 10–19 and R in 20–29 | 1 |
+| `InputFormat::abgr10` | `x2bgr10` | 10-bit packed RGB, little-endian 32-bit word with R in bits 0–9, G in 10–19 and B in 20–29 | 1 |
 | `InputFormat::ayuv` | `vuya` | 8-bit packed V8U8Y8A8 bytes | 1 |
 
-The packed RGB values `argb`, `abgr`, `argb10` and `abgr10` remain reserved
-for the SDK's RGB inputs. pixtreme 2.11.0 has no `PixelFormat` for them, so
-session creation rejects them as an `invalid_configuration` error.
+The packed formats (the four RGB formats and AYUV) accept any output chroma
+format that the codec and GPU support; `ChromaFormat::unspecified` selects
+4:2:0. NVENC converts RGB input to YUV internally. pixtreme's RGB formats hold
+full-range RGB without a YCbCr matrix. For `x2rgb10` and `x2bgr10`, pixtreme
+ignores bits 30–31 when reading and writes 3 to them. The bitstream's colour
+signalling comes from the session settings, not from the input format.
+
+With RGB input, a session accepts the matrix codes 1, 4, 5, 6, 7, 8 and 9 at
+either range, the unspecified code 2, or no matrix. `abgr` and `abgr10` input
+does not accept code 8 (YCgCo): NVENC's YCgCo conversion swaps R and B of that
+byte order, so the Co samples have the opposite sign. NVENC converts the
+accepted matrices and ranges as written. For codes 0, 11, 12, 13, 14, 16 and
+17, NVENC uses BT.601 instead of the conversion written in the signalling, and
+for code 10 it uses BT.2020 non-constant luminance. Code 15 has not been
+verified with RGB input. Session creation therefore rejects all of these codes
+with RGB input as `unsupported`; YUV input accepts them. These results come
+from the development RTX A6000 (sm 86) with H.264 8-bit and HEVC 8- and 10-bit
+output at 4:2:0 and 4:4:4. AV1, 4:2:2 output and H.264 10-bit output with RGB
+input, other GPU generations, and the conversion of sessions with the
+unspecified matrix 2 or without a matrix have not been verified on hardware.
 
 #### Input and output
 
@@ -246,10 +325,13 @@ only a region lent by the same session that has not been encoded. The encoder
 holds its own reference until NVENC has read the input. A region becomes free
 again once every reference is released and the work on the final release
 stream completes; taking its access unit is not required. Release a region that
-was never encoded with the stream of its last use. Once the session has been
-released and its close has finished, releasing the last region that the caller
-still holds waits inside that release call until the work on the regions'
-release streams completes; the wait does not keep the CPU busy. Call
+was never encoded with the stream of its last use. Releasing a region does not
+wait for its release stream, including the last region that the caller still
+holds after the session has been released. An encoder thread that does not keep
+the CPU busy then frees the memory after the stream's work completes; if the
+encoder cannot create that thread, the releasing call itself waits for the
+stream, also without keeping the CPU busy. If the process ends before that work
+completes, the encoder leaves the memory unfreed. Call
 `take(std::chrono::milliseconds)` to receive an access unit, a not-ready result,
 or the end of the stream after flushing. The wrapper prepares its vector before
 consuming an AU. If allocation fails, a later `take()` can retry the same queued
@@ -341,5 +423,7 @@ Each release includes the wheel and `SHA256SUMS` for integrity checks.
 ## License
 
 The package uses the MIT License. The wheel's `*.dist-info/licenses/` directory
-contains the project license and the MIT notice for NVIDIA's vendored NVENC
-header.
+contains the project license, the MIT notice for NVIDIA's vendored NVENC
+header, and the notices of the components compiled into the Python module:
+nanobind (BSD-3-Clause) and its robin_map (MIT). The wheel's license expression
+is `MIT AND BSD-3-Clause`.
