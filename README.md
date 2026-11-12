@@ -226,10 +226,37 @@ perform this runtime check. C++ classes, exceptions and automatic resource
 management stay in the consumer's header-only wrapper, so consumers can use a
 different compiler and standard library from the encoder.
 
+### Static embedding from source
+
+The wheel and prebuilt SDK distribute only the shared encoder library. To
+embed the encoder, use the Conan recipe with both `from_source=True` and
+`shared=False`; source access is required. The recipe rejects `shared=False`
+with the prebuilt SDK (`from_source=False`). Both forms expose the same C
+operations and public headers through `pixtreme::transport_nvenc`.
+
+After preparing the checkout's Conan dependencies as described in
+[Development](docs/development.md#tests), the underlying CMake build is:
+
+```bash
+cmake -S cpp -B build/static -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release
+cmake --build build/static -j2
+cmake --install build/static --prefix "$PWD/build/static-prefix"
+```
+
+The static archive contains only encoder objects. pixtreme remains a link
+dependency, and the installed target supplies `PIXTREME_TRANSPORT_NVENC_STATIC`
+to select undecorated C declarations. The shared build remains the default;
+Python builds explicitly select it. Static archives are built from source
+for embedding and are not published in wheels or SDK archives. Re-link an
+embedding artifact when updating its encoder; the shared library's ABI
+compatibility promise applies to callers linked to that shared library.
+
 ### C API
 
-For a C consumer, set `project(output_module LANGUAGES C)` in the CMake
-example and include `<pixtreme/nvenc/c/encoder.h>`. Before any other operation,
+For a C consumer of the shared encoder, set `project(output_module LANGUAGES C)`
+in the CMake example. A C consumer of the static encoder enables
+`LANGUAGES C CXX` so CMake can link the encoder's C++ implementation.
+Include `<pixtreme/nvenc/c/encoder.h>`. Before any other operation,
 compare `pixtreme_transport_nvenc_runtime_abi_version()` with
 `PIXTREME_TRANSPORT_NVENC_ABI_VERSION` and stop if they differ.
 
