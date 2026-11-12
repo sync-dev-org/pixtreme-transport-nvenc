@@ -23,7 +23,7 @@ For a uv project:
 uv add pixtreme-transport-nvenc
 ```
 
-The package depends on `pixtreme>=2.17.0`, whose wheel supplies the
+The package depends on `pixtreme>=2.17.1`, whose wheel supplies the
 `PixelBuffer` type and `libpixtreme.so.2`; the encoder finds that library in
 the same environment. At runtime, the encoder loads `libcuda.so.1` and
 `libnvidia-encode.so.1` from the host's NVIDIA driver. Neither driver library
@@ -118,28 +118,32 @@ includes `py.typed` and a stub generated from the module for type checkers.
 
 ## Use from C and C++
 
-Native C and C++ applications can obtain the prebuilt SDK from the public
-Release through Conan, independently of the Python wheel. Set `version` to
-a release that provides SDK assets and use Python 3.12 or later to verify and
-export the recipes (the compiled application needs no Python environment):
+Native C and C++ applications obtain the prebuilt SDK from the public
+Release through Conan, independently of the Python wheel. The recipes live
+in the private `sync-dev-org/conan-recipes` repository. Authenticate `gh`
+with an account that can read that repository, and follow its
+[download instructions](https://github.com/sync-dev-org/conan-recipes#using-a-recipe)
+to obtain and verify a shared Release archive containing both `pixtreme`
+and `pixtreme-transport-nvenc`. The download uses a temporary Conan
+`source_credentials.json` with the host's `gh` token; remove it immediately
+after downloading and keep the token out of commands and logs. Check the
+archive's SHA256 against the shared Release before extracting it.
+
+Set `recipes` to the extracted archive's `recipes/` directory, and choose
+an encoder version present in that archive. For the current SDK dependency,
+export pixtreme 2.17.1 into the same fresh Conan home:
 
 ```bash
 version=X.Y.Z
-base="https://github.com/sync-dev-org/pixtreme-transport-nvenc/releases/download/v$version"
-mkdir nvenc-release
-cd nvenc-release
-curl -fLO "$base/SHA256SUMS"
-curl -fLO "$base/pixtreme_transport_nvenc-$version-recipes.tar.gz"
-sha256sum -c SHA256SUMS --ignore-missing
-mkdir recipes
-tar -xzf "pixtreme_transport_nvenc-$version-recipes.tar.gz" -C recipes
-python3 recipes/sdk_release.py fetch "$version" --work-dir "$PWD/sdk"
-export CONAN_HOME="$PWD/sdk/conan-home"
+recipes=/absolute/path/to/verified-shared-release/recipes
+export CONAN_HOME="$(mktemp -d)"
+conan export "$recipes/pixtreme" --version 2.17.1
+conan export "$recipes/pixtreme-transport-nvenc" --version "$version"
+conan profile detect
 ```
 
-Use the Conan version in `recipes/recipes.json`. The helper checks the archive
-hash, exports both the encoder and pixtreme recipes and disables remotes in
-that new home. A consumer's `conanfile.py` declares:
+The compiled application needs no Python environment. A consumer's
+`conanfile.py` declares:
 
 ```python
 from conan import ConanFile
@@ -152,11 +156,15 @@ class OutputModule(ConanFile):
 ```
 
 Replace `X.Y.Z` with the required minimum. Run `conan install /path/to/consumer
---no-remote --build=missing -of /path/to/consumer/build`, then configure CMake
+--no-remote --build=missing -of /path/to/consumer/build
+--lockfile-out /path/to/consumer/conan.lock`, then configure CMake
 with `-DCMAKE_TOOLCHAIN_FILE=/path/to/consumer/build/conan_toolchain.cmake`
 and `-DCMAKE_BUILD_TYPE=Release`. The recipe verifies the SDK's URL and SHA256,
 requires the build SDK's pixtreme version or newer with `shared=True`, and
 packages the prebuilt files without compiling encoder or pixtreme sources.
+The same shared recipe supports `from_source=True` to build the matching
+private source tag when the caller has source access; its default is
+`from_source=False`. Keep the generated lock to record recipe revisions.
 The CMake example below works with these Conan packages. For execution from
 separate package prefixes, put both Conan library directories in the
 application's runtime search path. A deployed application can instead arrange
@@ -464,9 +472,10 @@ test-picture producer, excluding the core conversion and output module.
 Versioned wheels are published on PyPI and in the public
 [GitHub Releases](https://github.com/sync-dev-org/pixtreme-transport-nvenc/releases).
 SDK-enabled releases also contain
-`pixtreme_transport_nvenc-X.Y.Z-sdk-manylinux_2_28_x86_64.tar.gz` and
-`pixtreme_transport_nvenc-X.Y.Z-recipes.tar.gz`. `SHA256SUMS` records the wheel
-and both archives. The SDK retains the wheel's encoder library, public headers,
+`pixtreme_transport_nvenc-X.Y.Z-sdk-manylinux_2_28_x86_64.tar.gz`.
+`SHA256SUMS` records the wheel and the SDK archive. Recipes are distributed
+by `sync-dev-org/conan-recipes`, separately from the encoder Release. The SDK
+retains the wheel's encoder library, public headers,
 CMake package and license notices, and excludes Python and pixtreme libraries.
 
 ## License
