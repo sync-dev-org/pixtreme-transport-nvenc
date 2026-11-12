@@ -23,7 +23,7 @@ For a uv project:
 uv add pixtreme-transport-nvenc
 ```
 
-The package depends on `pixtreme>=2.12.0`, whose wheel supplies the
+The package depends on `pixtreme>=2.17.0`, whose wheel supplies the
 `PixelBuffer` type and `libpixtreme.so.2`; the encoder finds that library in
 the same environment. At runtime, the encoder loads `libcuda.so.1` and
 `libnvidia-encode.so.1` from the host's NVIDIA driver. Neither driver library
@@ -118,12 +118,57 @@ includes `py.typed` and a stub generated from the module for type checkers.
 
 ## Use from C and C++
 
+Native C and C++ applications can obtain the prebuilt SDK from the public
+Release through Conan, independently of the Python wheel. Set `version` to
+a release that provides SDK assets and use Python 3.12 or later to verify and
+export the recipes (the compiled application needs no Python environment):
+
+```bash
+version=X.Y.Z
+base="https://github.com/sync-dev-org/pixtreme-transport-nvenc/releases/download/v$version"
+mkdir nvenc-release
+cd nvenc-release
+curl -fLO "$base/SHA256SUMS"
+curl -fLO "$base/pixtreme_transport_nvenc-$version-recipes.tar.gz"
+sha256sum -c SHA256SUMS --ignore-missing
+mkdir recipes
+tar -xzf "pixtreme_transport_nvenc-$version-recipes.tar.gz" -C recipes
+python3 recipes/sdk_release.py fetch "$version" --work-dir "$PWD/sdk"
+export CONAN_HOME="$PWD/sdk/conan-home"
+```
+
+Use the Conan version in `recipes/recipes.json`. The helper checks the archive
+hash, exports both the encoder and pixtreme recipes and disables remotes in
+that new home. A consumer's `conanfile.py` declares:
+
+```python
+from conan import ConanFile
+
+class OutputModule(ConanFile):
+    settings = "os", "arch", "compiler", "build_type"
+    requires = "pixtreme-transport-nvenc/[>=X.Y.Z]"
+    default_options = {"pixtreme-transport-nvenc/*:shared": True}
+    generators = "CMakeDeps", "CMakeToolchain"
+```
+
+Replace `X.Y.Z` with the required minimum. Run `conan install /path/to/consumer
+--no-remote --build=missing -of /path/to/consumer/build`, then configure CMake
+with `-DCMAKE_TOOLCHAIN_FILE=/path/to/consumer/build/conan_toolchain.cmake`
+and `-DCMAKE_BUILD_TYPE=Release`. The recipe verifies the SDK's URL and SHA256,
+requires the build SDK's pixtreme version or newer with `shared=True`, and
+packages the prebuilt files without compiling encoder or pixtreme sources.
+The CMake example below works with these Conan packages. For execution from
+separate package prefixes, put both Conan library directories in the
+application's runtime search path. A deployed application can instead arrange
+the two SDKs in one prefix and retain their relative library layout. Before
+using the encoder, compare its runtime ABI with the header as described below.
+
 The package provides `<pixtreme/nvenc/c/encoder.h>` for C and
 `<pixtreme/nvenc/encoder.hpp>` for C++17. The C++ wrapper is header-only;
 only C functions cross the shared-library boundary. Both headers include
 pixtreme's `<pixtreme/pixel_buffer.h>` and require neither CUDA headers nor
-core headers. The package configuration finds the pixtreme SDK installed in the
-same environment. Locate the installed CMake
+core headers. The package configuration finds pixtreme through Conan or beside
+the encoder in a Python environment. For wheel consumers, locate the installed CMake
 prefix using the Python interpreter from the environment containing the wheel:
 
 ```bash
@@ -418,12 +463,16 @@ test-picture producer, excluding the core conversion and output module.
 
 Versioned wheels are published on PyPI and in the public
 [GitHub Releases](https://github.com/sync-dev-org/pixtreme-transport-nvenc/releases).
-Each release includes the wheel and `SHA256SUMS` for integrity checks.
+SDK-enabled releases also contain
+`pixtreme_transport_nvenc-X.Y.Z-sdk-manylinux_2_28_x86_64.tar.gz` and
+`pixtreme_transport_nvenc-X.Y.Z-recipes.tar.gz`. `SHA256SUMS` records the wheel
+and both archives. The SDK retains the wheel's encoder library, public headers,
+CMake package and license notices, and excludes Python and pixtreme libraries.
 
 ## License
 
 The package uses the MIT License. The wheel's `*.dist-info/licenses/` directory
-contains the project license, the MIT notice for NVIDIA's vendored NVENC
+contains the project license, the MIT notice for NVIDIA's NVENC
 header, and the notices of the components compiled into the Python module:
 nanobind (BSD-3-Clause) and its robin_map (MIT). The wheel's license expression
 is `MIT AND BSD-3-Clause`.
