@@ -23,18 +23,21 @@ For a uv project:
 uv add pixtreme-transport-nvenc
 ```
 
-The package depends on `pixtreme>=2.17.1`, whose wheel supplies the
-`PixelBuffer` type and `libpixtreme.so.2`; the encoder finds that library in
-the same environment. At runtime, the encoder loads `libcuda.so.1` and
-`libnvidia-encode.so.1` from the host's NVIDIA driver. Neither driver library
+The package depends on `pixtreme>=2.25.3`, whose wheel supplies the
+`PixelBuffer` type and its shared library (`libpixtreme.so.2` on Linux,
+`pixtreme-2.dll` on Windows). The encoder finds that library in the same
+environment. At runtime, the encoder loads `libcuda.so.1` and
+`libnvidia-encode.so.1` on Linux, or `nvcuda.dll` and `nvEncodeAPI64.dll` from
+Windows System32. Neither driver library
 nor the CUDA runtime is bundled in the wheel.
 
 ## Supported environments
 
 PyPI wheels support Linux x86_64 with glibc 2.28 or later
-(`manylinux_2_28_x86_64`), including WSL2, and CPython 3.12 or later. One
-`cp312-abi3` wheel, whose Python module uses CPython's stable ABI, serves every
-supported Python version. PyPI releases contain
+(`manylinux_2_28_x86_64`), including WSL2, and native Windows x86_64
+(`win_amd64`), with CPython 3.12 or later. Each platform has a
+`cp312-abi3` wheel whose Python module uses CPython's stable ABI and serves
+every supported Python version. PyPI releases contain
 wheels only; no source distribution is uploaded. Installation on another
 operating system or CPU architecture fails with no matching distribution.
 Encoding requires an NVIDIA GPU with NVENC support for the selected codec and
@@ -131,13 +134,13 @@ archive's SHA256 against the shared Release before extracting it.
 
 Set `recipes` to the extracted archive's `recipes/` directory, and choose
 an encoder version present in that archive. For the current SDK dependency,
-export pixtreme 2.17.1 into the same fresh Conan home:
+export pixtreme 2.25.3 into the same fresh Conan home:
 
 ```bash
 version=X.Y.Z
 recipes=/absolute/path/to/verified-shared-release/recipes
 export CONAN_HOME="$(mktemp -d)"
-conan export "$recipes/pixtreme" --version 2.17.1
+conan export "$recipes/pixtreme" --version 2.25.3
 conan export "$recipes/pixtreme-transport-nvenc" --version "$version"
 conan profile detect
 ```
@@ -199,7 +202,17 @@ target_link_libraries(output_module PRIVATE pixtreme::transport_nvenc)
 ```
 
 The target supplies the public include directories, the pixtreme target,
-C++17 requirement and shared library. CMake gives the build executable a
+C++17 requirement and shared library. On Windows, the SDK contains
+`bin/pixtreme_nvenc-6.dll` and `lib/pixtreme_nvenc.lib`; link through
+`pixtreme::transport_nvenc`. Use a compatible MSVC toolchain with the dynamic
+C runtime (`/MD`). The application must make the encoder's `bin/` and
+pixtreme's `core/bin/` available to its DLL loader, for example by deploying
+the DLLs beside its executable or registering their directories with
+`AddDllDirectory`. Load one encoder DLL and one pixtreme DLL in each process.
+Python packages register their own DLL directories before importing native
+modules; applications using the SDK need no Python environment or nvcc.
+
+On Linux, CMake gives the build executable a
 runtime search path to the encoder and pixtreme. An installed consumer must
 retain an appropriate `INSTALL_RPATH`. For a shared library installed at
 `pixtreme/transport/output/liboutput.so`, use paths relative to that library:
@@ -238,9 +251,13 @@ After preparing the checkout's Conan dependencies as described in
 [Development](docs/development.md#tests), the underlying CMake build is:
 
 ```bash
-cmake -S cpp -B build/static -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release
-cmake --build build/static -j2
-cmake --install build/static --prefix "$PWD/build/static-prefix"
+python3 cpp/conan/prepare.py --offline --output build/cpp
+. ./build/cpp/conanbuild.sh
+cd cpp
+cmake --preset conan-release -DBUILD_SHARED_LIBS=OFF
+cmake --build --preset conan-release -j8
+cmake --install ../build/cpp --prefix "$PWD/../build/static-prefix"
+cd ..
 ```
 
 The static archive contains only encoder objects. pixtreme remains a link
@@ -499,8 +516,9 @@ test-picture producer, excluding the core conversion and output module.
 Versioned wheels are published on PyPI and in the public
 [GitHub Releases](https://github.com/sync-dev-org/pixtreme-transport-nvenc/releases).
 SDK-enabled releases also contain
-`pixtreme_transport_nvenc-X.Y.Z-sdk-manylinux_2_28_x86_64.tar.gz`.
-`SHA256SUMS` records the wheel and the SDK archive. Recipes are distributed
+`pixtreme_transport_nvenc-X.Y.Z-sdk-manylinux_2_28_x86_64.tar.gz` and
+`pixtreme_transport_nvenc-X.Y.Z-sdk-win_amd64.tar.gz`.
+One `SHA256SUMS` records both wheels and both SDK archives. Recipes are distributed
 by `sync-dev-org/conan-recipes`, separately from the encoder Release. The SDK
 retains the wheel's encoder library, public headers,
 CMake package and license notices, and excludes Python and pixtreme libraries.
