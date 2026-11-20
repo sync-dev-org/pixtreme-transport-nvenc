@@ -349,6 +349,18 @@ average `bitrate` and `max_bitrate`, or `RateControl::constqp` with
 where the codec and GPU support it. B frames are controlled by `b_frames`;
 lookahead is controlled by `enable_lookahead` and `lookahead_depth`.
 
+`max_reference_frames` selects the DPB size. `num_ref_l0` and `num_ref_l1`
+select forward and backward reference counts independently (0–7 for H.264 and
+H.265; AV1 permits 0–4 forward and 0–3 backward). A count above one requires
+the codec's multiple-reference capability. `vbv_buffer_size` and
+`vbv_initial_delay` specify the VBV buffer size and initial delay in bits.
+All five fields default to zero, preserving the NVENC preset/driver defaults;
+nonzero values are passed without rounding. The C settings record, C++
+`Settings` and Python `Settings` use the same field names.
+`effective_settings().accepted` retains the request, while the five fields
+on `EffectiveSettings` report the values passed to NVENC, including preset
+defaults. AV1 reference counts are SDK hints and may differ from the output.
+
 `input_slots` selects the fixed number of input regions. At least `1+B`
 regions are required without lookahead and `1+B+L` with lookahead, where
 `B=b_frames` and `L=lookahead_depth`. A smaller count is an
