@@ -288,7 +288,7 @@ the other record. The header documents the field rules, including unknown
 extensions and partial fields.
 
 Create a session with `pixtreme_transport_nvenc_session_create`. Its remaining
-operations are `session_acquire_input`, `session_encode`, `session_flush`,
+operations are `session_acquire_input`, `session_encode`, `session_reconfigure`, `session_flush`,
 `session_close`, `session_take` and `session_effective_settings`, with the same
 prefix. Input regions are `pixtreme_pixel_buffer_t` handles, and wait durations
 use nonnegative `int64_t` milliseconds. The functions return an `int32_t`
@@ -474,6 +474,65 @@ close. A region the caller still holds keeps its memory until its final
 release. A cleanup failure throws a fatal `EncoderError` distinct from the
 original output error. Other operation failures also use `EncoderError`, which
 exposes their reason and recoverable or fatal classification.
+
+### Change settings during a session
+
+`Session::reconfigure(settings, start_new_stream)` and Python's
+`Session.reconfigure(settings, start_new_stream)` take the complete `Settings`,
+just like session creation. The C operation is
+`pixtreme_transport_nvenc_session_reconfigure(session, settings, start_new_stream, error)`;
+its stream flag is a `uint32_t` containing 0 or 1.
+
+For example, Python can reuse a session for independent clips by changing its
+current settings before submitting the next clip:
+
+```python
+settings = session.effective_settings().accepted
+settings.bitrate = 2_000_000
+session.reconfigure(settings, start_new_stream=True)
+# Take every access unit of the previous clip, then submit the next clip.
+```
+
+The same change in C++ is:
+
+```cpp
+auto settings = session.effective_settings().accepted;
+settings.bitrate = 2'000'000;
+session.reconfigure(settings, true);
+```
+
+With `start_new_stream=true`, pending pictures become available through `take()`
+without another input. The next input becomes an IDR with parameter sets, has
+no reference to the previous stream, and starts with reset rate control. The
+bitstream beginning at that IDR can be decoded independently. The operation
+maps this single flag to NVENC's `forceIDR=1` and `resetEncoder=1`.
+
+With `start_new_stream=false`, changes affect pictures encoded after the
+operation, including accepted pictures still waiting for encoding. Access units
+already copied to the caller stay valid. Both modes preserve accepted pictures,
+queued output, coding order and the timestamps attached to each input.
+
+| Setting | Change during a session |
+|---|---|
+| Rate control mode, CBR/VBR bitrate, VBR maximum, CONSTQP I/P/B QPs | Allowed |
+| VBV buffer size and initial delay | Allowed; initial delay is used when rate control resets |
+| Forward reference count (`num_ref_l0`) | Requires `start_new_stream=true` |
+| Backward reference count (`num_ref_l1`) | H.264 requires `start_new_stream=true`; H.265 permits either mode |
+| IDR period | H.264 permits either direction; H.265 permits increases only |
+| Every other setting | Requires recreating the session |
+
+Settings that require recreation include codec, profile, dimensions, input
+format, precision, chroma, frame rate, GOP length, B frames, lookahead, DPB size,
+lossless tuning, colour, device, input regions and queue capacity. The operation
+rejects these changes before calling NVENC, with `INVALID_CONFIGURATION` and
+`RECOVERABLE`, naming the field and the required action. Reconfiguration after
+`flush()` or `close()` returns `INVALID_STATE` and `RECOVERABLE`. A failed NVENC
+reconfiguration is fatal because its previous state cannot be confirmed.
+
+`effective_settings()` returns one complete snapshot of the last successful
+configuration, including when another thread changes settings. A change rejected
+before NVENC leaves that snapshot unchanged. `flush()` still ends session input;
+call `reconfigure()` before flushing when the session will continue.
 
 ### Colour signalling
 
