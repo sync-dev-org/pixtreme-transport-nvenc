@@ -290,9 +290,16 @@ extensions and partial fields.
 
 Use `pixtreme_transport_nvenc_settings_default` to create complete settings without
 accessing a GPU, and `pixtreme_transport_nvenc_settings_apply_options` to apply
-name/string-value pairs atomically. C++ and Python expose `default_settings`
-and `apply_options`. See [Encoder settings](docs/settings.md) for defaults, names
-and value spellings.
+name/string-value pairs atomically. Use
+`pixtreme_transport_nvenc_settings_apply_pixel_format` to set the input layout,
+input/output precision, output chroma and profile from a pixtreme `PixelFormat`
+name without accessing a GPU. C++ and Python expose `default_settings`,
+`apply_pixel_format` and `apply_options`. Create defaults, apply the pixel
+format, apply explicit overrides, then create the session. The pixel-format
+operation replaces all five fields; apply an explicit profile or chroma choice
+afterward. GPU support is checked when creating the session.
+See [Encoder settings](docs/settings.md) for the format/profile table, defaults,
+names and value spellings.
 Colour options such as `primaries` set their value and presence together;
 `unspecified` removes the value. Colour presence flags are not named options.
 For an absent chroma location, pass `chroma_top` and `chroma_bottom` together.
