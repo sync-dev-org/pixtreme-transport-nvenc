@@ -4,7 +4,8 @@
 H.265 (HEVC) and AV1 encoding with NVIDIA NVENC. C and C++ output modules link
 the encoder, write each frame into an encoder-owned CUDA region lent as a
 [pixtreme](https://pypi.org/project/pixtreme/) `PixelBuffer`, and receive
-encoded access units with their original timestamps. The Python module
+encoded access units with their original presentation timestamps and decoding
+timestamps (DTS). The Python module
 `pixtreme.transport.nvenc` offers the same operations to Python code.
 
 One wheel includes the shared library, public C header and header-only C++ wrapper, CMake package
@@ -105,7 +106,7 @@ such a region and the caller's integer timestamp; it does not accept a pixtreme
 `Frame`. Release the region by dropping the last reference to it. `take(timeout)`
 returns a `TakeResult` whose `status` is `ACCESS_UNIT`, `NOT_READY` or, after
 `flush()`, `END`; its `access_unit` holds the bitstream as `bytes`, the
-timestamp, `is_idr`, `display_order` and `picture_type`. `close(timeout)`
+timestamp (PTS), signed `dts`, `is_idr`, `display_order` and `picture_type`. `close(timeout)`
 returns `False` while it cannot confirm that NVENC no longer reads input.
 `effective_settings()` returns the accepted settings and low-latency switches.
 
@@ -289,7 +290,7 @@ extensions and partial fields.
 
 Create a session with `pixtreme_transport_nvenc_session_create`. Its remaining
 operations are `session_acquire_input`, `session_encode`, `session_reconfigure`, `session_flush`,
-`session_close`, `session_take` and `session_effective_settings`, with the same
+`session_close`, `session_take`, `session_codec_configuration` and `session_effective_settings`, with the same
 prefix. Input regions are `pixtreme_pixel_buffer_t` handles, and wait durations
 use nonnegative `int64_t` milliseconds. The functions return an `int32_t`
 status and optionally an owned error handle; read its reason, classification
@@ -308,8 +309,10 @@ wrapper performs this reference management automatically.
 For output, pass a writable host buffer and its capacity to `session_take`,
 along with pointers for size, a sized
 `pixtreme_transport_nvenc_access_unit_metadata` record and the take status.
-The record supplies `timestamp`, `is_idr`, `display_order` and
-`picture_type`. A capacity of zero with a null buffer is a normal size query.
+The record supplies `timestamp`, `is_idr`, `display_order`, `picture_type` and
+signed `dts`. The appended `dts` field is written only when the caller's sized
+record includes the complete field; older records keep their existing layout.
+A capacity of zero with a null buffer is a normal size query.
 `PIXTREME_TRANSPORT_NVENC_BUFFER_TOO_SMALL` succeeds without changing the
 buffer or consuming the AU, and reports a required size greater than the
 supplied capacity. Allocate at least that size and retry. Another consumer can
@@ -325,8 +328,9 @@ All public types are in `pixtreme::transport::nvenc`. Construct a `Session`
 with `Settings` specifying `codec`, dimensions, `input_format`, `profile`,
 rate control, frame rate, GOP length, `idr_period`, `input_slots` and CUDA
 `device`. Select `Codec::h264`, `Codec::hevc` or `Codec::av1` through the same
-API. The positive rational `frame_rate` is used for rate control; it does not
-generate timestamps or check input intervals. `idr_period` sets the IDR period
+API. The positive rational `frame_rate` is used for rate control; DTS uses
+input timestamps rather than the frame rate. The encoder does not check input
+intervals. `idr_period` sets the IDR period
 for H.264/HEVC and the key-frame period for AV1.
 
 `Profile::main` selects the chosen codec's Main profile. HEVC also provides
@@ -454,6 +458,19 @@ identifies the input picture in display order, and `picture_type` identifies
 the codec's picture category. `is_idr` identifies H.264/HEVC IDR pictures and
 AV1 key pictures.
 
+`dts` is a signed 64-bit decoding timestamp in the same unit as `timestamp`
+(PTS); the caller owns that unit and supplies it to the muxer. For H.264/H.265
+with B frames, coding-order AU `i > 0` receives the timestamp of input `i - 1`
+in display order, and the first AU receives the first input timestamp minus
+one. With no B frames, and for every AV1 temporal unit, DTS equals PTS.
+Lookahead does not change this calculation. An independent-stream
+reconfiguration restarts the calculation for the next input while pending
+old access units keep their DTS. Timestamps may continue or restart at zero
+for the new stream. Input timestamps must be less than `2^63`; larger values
+raise a recoverable `INVALID_CONFIGURATION` error before NVENC receives the
+picture. The encoder accepts duplicate or decreasing input timestamps and
+does not require DTS to increase for those inputs.
+
 For H.264/HEVC, an AU contains one coded picture and its associated NAL units.
 For AV1 without scalability, it is a temporal unit containing one shown
 picture and the preceding no-show frame OBUs needed for that display, in
@@ -474,6 +491,29 @@ close. A region the caller still holds keeps its memory until its final
 release. A cleanup failure throws a fatal `EncoderError` distinct from the
 original output error. Other operation failures also use `EncoderError`, which
 exposes their reason and recoverable or fatal classification.
+
+### Codec configuration and in-band parameter sets
+
+`Session::codec_configuration()` returns caller-owned bytes in C++;
+`Session.codec_configuration()` returns Python `bytes`. Call it before the first
+input to obtain H.264 SPS/PPS or H.265 VPS/SPS/PPS as Annex B, or an AV1
+sequence-header OBU. Each call reflects the last successful session creation or
+reconfiguration and leaves queued access units and their order unchanged.
+The returned bytes remain valid after the session closes.
+
+The C operation is
+`pixtreme_transport_nvenc_session_codec_configuration(session, buffer, capacity, size, error)`.
+Pass a null buffer and zero capacity to query the required size. If the returned
+size exceeds capacity, the operation succeeds without copying any bytes. Retry
+with enough caller-owned host memory; otherwise exactly the returned size is
+copied. Calls after flush or close return an invalid-state error.
+
+`Settings::repeat_parameter_sets` and Python's `Settings.repeat_parameter_sets`
+default to `true` / `True`. Set them to false for a container that stores codec
+configuration separately: IDR/key-frame access units then carry no parameter
+sets. The C field is a `uint32_t` containing 0 or 1; an older sized settings
+record that omits this field retains the repeating default. This field requires
+session recreation to change.
 
 ### Change settings during a session
 
@@ -504,7 +544,9 @@ session.reconfigure(settings, true);
 With `start_new_stream=true`, pending pictures become available through `take()`
 without another input. The next input becomes an IDR with parameter sets, has
 no reference to the previous stream, and starts with reset rate control. The
-bitstream beginning at that IDR can be decoded independently. The operation
+bitstream beginning at that IDR can be decoded independently. When
+`repeat_parameter_sets` is false, combine the new codec configuration with that
+IDR stream for independent decoding. The operation
 maps this single flag to NVENC's `forceIDR=1` and `resetEncoder=1`.
 
 With `start_new_stream=false`, changes affect pictures encoded after the
@@ -523,7 +565,8 @@ queued output, coding order and the timestamps attached to each input.
 
 Settings that require recreation include codec, profile, dimensions, input
 format, precision, chroma, frame rate, GOP length, B frames, lookahead, DPB size,
-lossless tuning, colour, device, input regions and queue capacity. The operation
+lossless tuning, colour, device, input regions, queue capacity and
+`repeat_parameter_sets`. The operation
 rejects these changes before calling NVENC, with `INVALID_CONFIGURATION` and
 `RECOVERABLE`, naming the field and the required action. Reconfiguration after
 `flush()` or `close()` returns `INVALID_STATE` and `RECOVERABLE`. A failed NVENC
