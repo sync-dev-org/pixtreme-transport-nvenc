@@ -288,6 +288,15 @@ in two independent records, so each record can grow without moving fields in
 the other record. The header documents the field rules, including unknown
 extensions and partial fields.
 
+Use `pixtreme_transport_nvenc_settings_default` to create complete settings without
+accessing a GPU, and `pixtreme_transport_nvenc_settings_apply_options` to apply
+name/string-value pairs atomically. C++ and Python expose `default_settings`
+and `apply_options`. See [Encoder settings](docs/settings.md) for defaults, names
+and value spellings.
+Colour options such as `primaries` set their value and presence together;
+`unspecified` removes the value. Colour presence flags are not named options.
+For an absent chroma location, pass `chroma_top` and `chroma_bottom` together.
+
 Create a session with `pixtreme_transport_nvenc_session_create`. Its remaining
 operations are `session_acquire_input`, `session_encode`, `session_reconfigure`, `session_flush`,
 `session_close`, `session_take`, `session_codec_configuration` and `session_effective_settings`, with the same
@@ -358,8 +367,11 @@ select forward and backward reference counts independently (0–7 for H.264 and
 H.265; AV1 permits 0–4 forward and 0–3 backward). A count above one requires
 the codec's multiple-reference capability. `vbv_buffer_size` and
 `vbv_initial_delay` specify the VBV buffer size and initial delay in bits.
-All five fields default to zero, preserving the NVENC preset/driver defaults;
-nonzero values are passed without rounding. The C settings record, C++
+Directly constructed C++ and Python `Settings` leave all five fields at zero,
+preserving the NVENC preset/driver defaults. The `default_settings` operation
+sets the VBV buffer size to twice the rounded average bitrate, in bits, and
+leaves the initial delay at zero. DPB size and reference counts remain zero.
+Nonzero values are passed without rounding. The C settings record, C++
 `Settings` and Python `Settings` use the same field names.
 `effective_settings().accepted` retains the request, while the five fields
 on `EffectiveSettings` report the values passed to NVENC, including preset
